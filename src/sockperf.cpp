@@ -3511,6 +3511,55 @@ static int set_sockets_from_feedfile(const char *feedfile_name) {
     return rc;
 }
 
+#ifdef USING_VMA_EXTRA_API
+/* It is special code block to verify
+ * RM# 4251780
+ */
+void *test_malloc(size_t size) {
+    void *ptr = malloc(size);
+    log_msg("Allocated memory: ptr=%p size=%ld", ptr, size);
+    return ptr;
+}
+
+void test_free(void *ptr) {
+    free(ptr);
+    log_msg("Freed memory: ptr=%p", ptr);
+}
+
+void test_init(void)
+{
+    if (!g_vma_api || !(g_vma_api->vma_extra_supported_mask & VMA_EXTRA_API_IOCTL)) {
+        errno = EOPNOTSUPP;
+        exit_with_err("VMA Extra API does not support VMA_EXTRA_API_IOCTL", SOCKPERF_ERR_FATAL);
+    }
+
+    int rc = 0;
+	vma_cmsg_ioctl_user_alloc_t data;
+	struct cmsghdr *cmsg;
+	char cbuf[CMSG_SPACE(sizeof(data))];
+
+	cmsg = (struct cmsghdr *)cbuf;
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = CMSG_VMA_IOCTL_USER_ALLOC;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(data));
+	data.flags = VMA_IOCTL_USER_ALLOC_FLAG_TX | VMA_IOCTL_USER_ALLOC_FLAG_RX;
+	data.memalloc = test_malloc;
+	data.memfree = test_free;
+	memcpy(CMSG_DATA(cmsg), &data, sizeof(data));
+
+#ifndef VMA_XLIO_NO_FUNCTIONS_DEFINES
+#undef ioctl
+	rc = g_vma_api->ioctl(cmsg, cmsg->cmsg_len);
+    #define ioctl(...) fn_ioctl(__VA_ARGS__)
+#else
+	rc = g_vma_api->ioctl(cmsg, cmsg->cmsg_len);
+#endif
+	if (rc < 0) {
+        exit_with_err("VMA Extra API ioctl() failure.", SOCKPERF_ERR_FATAL);
+    }
+}
+#endif // USING_VMA_EXTRA_API
+
 //------------------------------------------------------------------------------
 /* Sanity check for the sockets list inside g_fds_array. */
 static bool fds_array_is_valid() {
@@ -3578,6 +3627,12 @@ int bringup(const int *p_daemonize) {
 #ifdef USING_VMA_EXTRA_API
             _vma_pkts_desc_size =
                 sizeof(struct vma_packets_t) + sizeof(struct vma_packet_t) + sizeof(struct iovec) * 16;
+            {
+                /* It is special code block to verify
+                 * RM# 4251780
+                 */
+                test_init();
+            }
 #endif // USING_VMA_EXTRA_API
         } else {
 #ifdef USING_XLIO_EXTRA_API
@@ -3586,7 +3641,6 @@ int bringup(const int *p_daemonize) {
                 sizeof(struct xlio_recvfrom_zcopy_packet_t) + sizeof(struct iovec) * 16;
 #endif // USING_XLIO_EXTRA_API
         }
-
     }
 #else
     if (!rc && (s_user_params.is_rxfiltercb || s_user_params.is_zcopyread ||
